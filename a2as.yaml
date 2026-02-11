@@ -1,0 +1,301 @@
+manifest:
+  version: "0.1.3"
+  schema: https://a2as.org/cert/schema
+  subject:
+    name: r4stin/kg-research-agent
+    source: https://github.com/r4stin/kg-research-agent
+    branch: main
+    commit: "0f16c2e6"
+    scope: [src/agents/answer_agent.py, src/agents/evidence_agent.py, src/agents/planner_agent.py, src/agents/research_agent.py,
+      src/agents/retriever_agent.py, src/config.py, src/models/agent_messages.py, src/models/evidence.py, src/pipelines/run_evidence_and_answer.py,
+      src/run_evidence_extraction.py, src/run_rag.py, src/tools/vector_search.py]
+  issued:
+    by: A2AS.org
+    at: '2026-02-11T16:57:30Z'
+    url: https://a2as.org/certified/agents/r4stin/kg-research-agent
+  signatures:
+    digest: sha256:kNBM0xwQu8h93EAGQQ01LnWKYob8-xo4gR1h66-4PeU
+    key: ed25519:Rc-Y9OuEN00HUNBKQ-J-nxVM0Coh8vtFv8kNPYifwB8
+    sig: ed25519:KpDTFPXmdtowSDl81h-ZIXES3t9p3q_Qy0jiOA9gPIUD_PjCeqBUQzDkxczfVKz6jpOpvh-cGOsg_hn7UaRmAw
+
+agents:
+  agent.0:
+    type: instance
+    models: [gemini-2.0-pro-exp]
+    params:
+      name: evidence_agent
+      description: Extracts structured evidence (claim + supporting sentence) from retrieved chunks.
+      instruction: [You are an evidence extraction assistant., 'Given:', '- a research question, and', '- a set of retrieved
+          text chunks from scientific papers (with metadata),', 'you must extract a SMALL number of key claims that answer
+          the question,', 'and for each claim, provide ONE supporting evidence sentence and full citation.', 'Return your
+          result as STRICT JSON, with the following structure:', '{', '"question": "<the original question>",', '"items":
+          [', '{', '"claim": "<concise claim>",', '"evidence_sentence": "<one supporting sentence from the text>",', '"paper_id":
+          "<paper identifier from metadata>",', '"chunk_index": <chunk index from metadata as integer>,', '"source": "<source
+          filename from metadata>"', '},', "...", ']', '}', 'Guidelines:', '- Use ONLY the provided chunks. Do NOT invent
+          facts.', '- Prefer sentences that clearly, directly support the claim.', '- You may output between 1 and 5 items.',
+        '- The ''evidence_sentence'' should be copied or minimally edited from the chunk text.', '- If the chunks do not contain
+          enough information, return an empty ''items'' list.']
+      function: create_evidence_agent
+      instance: agent
+  agent.1:
+    type: instance
+    models: [gemini-2.0-pro-exp]
+    tools: [vector_search]
+    params:
+      name: research_agent
+      description: Evidence-grounded research assistant over ingested PDFs.
+      instruction: [You are a scientific research assistant., 'Your job:', 1. Use the `vector_search` tool to retrieve relevant
+          text chunks from research papers., 2. Carefully read the returned chunks., 3. Answer the user's question ONLY using
+          information from those chunks., '4. When you make a claim, cite the source in parentheses using:', '(paper_id=...,
+          chunk_index=..., source=...)', 'Important rules:', '- Do NOT invent facts that are not present in the retrieved
+          chunks.', '- If the retrieved chunks are not sufficient to answer the question reliably,', say that explicitly and
+          suggest what additional information would be needed., '- Prefer quoting short, precise sentences from the chunks
+          rather than paraphrasing too loosely.']
+      function: create_research_agent
+      instance: agent
+  agent.2:
+    type: instance
+    models: [gemini-2.0-pro-exp]
+    params:
+      name: planner_agent
+      description: Plans which agents should run in which order.
+      instruction: [You are a planning agent that decides how to answer research questions, about scientific papers., Your
+          job is to produce a small list of tasks that downstream agents will execute., 'Available task types:', '- "retrieval":
+          retrieve relevant chunks from the vector store.', '- "evidence": run evidence extraction over already retrieved
+          context.', '- "answer": synthesize the final answer from structured evidence.', 'Guidelines:', '- For most research
+          questions, you will:', '1) call "retrieval" with the original question,', '2) then "evidence" with the same question,',
+        3) then "answer" with the same question., '- If the question is clearly unanswerable or off-topic, respond with an
+          empty list.', '- Do NOT include tools or implementation details, just tasks.', 'Return STRICTLY valid JSON with
+          this shape:', '{', '"tasks": [', '{', '"task_type": "<retrieval|evidence|answer>",', '"query": "<string>"', '},',
+        "...", ']', '}']
+      function: create_planner_agent
+      instance: agent
+  answer_agent:
+    type: instance
+    models: [gemini-2.0-pro-exp]
+    params:
+      name: answer_agent
+      description: Composes a natural language answer based on structured evidence items.
+      instruction: [You are a scientific answering assistant., 'You will be given:', '- a research question', '- a small list
+          of structured evidence items, each with:', '- claim', '- evidence_sentence', '- paper_id', '- chunk_index', '- source
+          (PDF filename)', 'Your job is to write a clear, concise answer to the question,', STRICTLY based on the provided
+          evidence., 'Guidelines:', 1. Do NOT invent facts beyond what is in the evidence., '2. If the evidence is insufficient
+          or incomplete, say that explicitly.', '3. When you state something, support it with citations using this format:',
+        '[C1], [C2], ...', '4. After the main answer, add a short "Evidence" section that lists each citation:', '[C1] <evidence_sentence>
+          (paper_id=..., chunk_index=..., source=...)', '[C2] ...', '5. Prefer to:', '- combine related claims,', '- make
+          the logical connection explicit (e.g., "because", "therefore"),', '- avoid over-claiming beyond what the evidence
+          supports.']
+      function: create_answer_agent
+
+models:
+  gemini-2.0-pro-exp:
+    type: literal
+    agents: [agent.0, agent.1, answer_agent, agent.2]
+    params:
+      alias: [models/gemini-2.0-pro-exp]
+
+tools:
+  vector_search:
+    type: function
+    agents: [agent.1]
+    params:
+      description: |-
+        Query the 'research_papers' collection for the k most similar chunks.
+        Returns a list of dicts: {text, paper_id, chunk_index, source, distance}.
+
+imports:
+  asyncio: asyncio
+  BaseModel: pydantic.BaseModel
+  CHROMA_DB_PATH: src.config.CHROMA_DB_PATH
+  chromadb: chromadb
+  create_answer_agent: src.agents.answer_agent.create_answer_agent
+  create_evidence_agent: src.agents.evidence_agent.create_evidence_agent
+  create_research_agent: src.agents.research_agent.create_research_agent
+  deduplicate_evidence: src.utils.dedup_evidence.deduplicate_evidence
+  Dict: typing.Dict
+  EmbeddingFunction: chromadb.utils.embedding_functions.EmbeddingFunction
+  EvidenceBatch: src.models.agent_messages.EvidenceBatch
+  EvidenceItem: src.models.evidence.EvidenceItem
+  EvidenceResponse: src.models.evidence.EvidenceResponse
+  Field: pydantic.Field
+  FinalAnswer: src.models.agent_messages.FinalAnswer
+  format_hits_for_prompt: src.utils.format_hits.format_hits_for_prompt
+  GEMINI_MODEL: src.config.GEMINI_MODEL
+  GeminiEmbeddingFunction: src.embeddings.GeminiEmbeddingFunction
+  genai: google.generativeai
+  GOOGLE_API_KEY: src.config.GOOGLE_API_KEY
+  InMemorySessionService: google.adk.sessions.InMemorySessionService
+  json: json
+  List: typing.List
+  LlmAgent: google.adk.agents.LlmAgent
+  load_dotenv: dotenv.load_dotenv
+  Neo4jClient: src.kg.kg_client.Neo4jClient
+  Optional: typing.Optional
+  os: os
+  Path: pathlib.Path
+  plan_question: src.agents.planner_agent.plan_question
+  PlannerTask: src.models.agent_messages.PlannerTask
+  pprint: pprint.pprint
+  ResearchQuery: src.models.agent_messages.ResearchQuery
+  RetrievedChunk: src.models.agent_messages.RetrievedChunk
+  RetrievedContext: src.models.agent_messages.RetrievedContext
+  run_answer_agent: src.agents.answer_agent.run_answer_agent
+  run_evidence_agent: src.agents.evidence_agent.run_evidence_agent
+  run_retriever: src.agents.retriever_agent.run_retriever
+  Runner: google.adk.Runner
+  SessionState: src.models.session_state.SessionState
+  types: google.genai.types
+  vector_search: src.tools.vector_search.vector_search
+
+functions:
+  __call__:
+    type: sync
+    module: src.embeddings
+    args: [self, texts]
+    params:
+      returns: List[List[float]]
+  __init__:
+    type: sync
+    module: src.embeddings
+    args: [self, model]
+  _run_answer_agent_async:
+    type: async
+    module: src.agents.answer_agent
+    args: [evidence]
+    params:
+      returns: FinalAnswer
+  _run_evidence_agent_async:
+    type: async
+    module: src.agents.evidence_agent
+    args: [ctx, question]
+    params:
+      returns: EvidenceBatch
+  create_answer_agent:
+    type: sync
+    module: src.agents.answer_agent
+    params:
+      returns: LlmAgent
+  create_evidence_agent:
+    type: sync
+    module: src.agents.evidence_agent
+    params:
+      returns: LlmAgent
+  create_planner_agent:
+    type: sync
+    module: src.agents.planner_agent
+    params:
+      returns: LlmAgent
+  create_research_agent:
+    type: sync
+    module: src.agents.research_agent
+    params:
+      returns: LlmAgent
+  handle_one_turn:
+    type: sync
+    module: src.pipelines.run_multi_agent_pipeline
+    args: [question, session_state]
+    params:
+      returns: FinalAnswer
+  main:
+    type: sync
+    module: src.pipelines.run_multi_agent_pipeline
+  name:
+    type: sync
+    module: src.embeddings
+    args: [self]
+    params:
+      returns: str
+  plan_question:
+    type: sync
+    module: src.agents.planner_agent
+    args: [question, history_context]
+    params:
+      returns: List[PlannerTask]
+  run_answer_agent:
+    type: sync
+    module: src.agents.answer_agent
+    args: [evidence]
+    params:
+      returns: FinalAnswer
+  run_evidence_agent:
+    type: sync
+    module: src.agents.evidence_agent
+    args: [ctx, question]
+    params:
+      returns: EvidenceBatch
+  run_retriever:
+    type: sync
+    module: src.agents.retriever_agent
+    args: [task, k]
+    params:
+      returns: RetrievedContext
+  vector_search:
+    type: sync
+    module: src.tools.vector_search
+    args: [query, k]
+    params:
+      returns: List[Dict]
+
+variables:
+  CHROMA_DB_PATH:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [src.config]
+  CHUNK_STORAGE:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [src.config]
+  GEMINI_MODEL:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [src.config]
+  GOOGLE_API_KEY:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [src.config]
+  LOG_DIR:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [src.config]
+  LOG_LEVEL:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [src.config]
+  NEO4J_PASSWORD:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [src.config]
+  NEO4J_URI:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [src.config]
+  NEO4J_USER:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [src.config]
+  PDF_STORAGE:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [src.config]
+
+files:
+  CHROMA_DB_PATH:
+    type: variable
+    actions: [read]
+    params:
+      caller: [Path]
+  LOG_DIR:
+    type: variable
+    actions: [read]
+    params:
+      caller: [Path]
